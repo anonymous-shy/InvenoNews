@@ -4,7 +4,7 @@ import java.time.{LocalDate, LocalDateTime}
 import java.util
 import java.util.Properties
 
-import Constant._
+import com.donews.streaming.Constant._
 import com.donews.utils._
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.node.ObjectNode
@@ -14,20 +14,23 @@ import org.apache.spark.streaming.dstream.InputDStream
 import org.apache.spark.streaming.kafka.{HasOffsetRanges, OffsetRange}
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 import org.apache.spark.{SparkConf, SparkContext}
+import org.elasticsearch.spark.rdd.EsSpark
 import org.slf4j.{Logger, LoggerFactory}
-import redis.clients.jedis.JedisCluster
 
 object NewsStreaming {
   val Log: Logger = LoggerFactory.getLogger(getClass)
 
   def main(args: Array[String]): Unit = {
-
+    val commonProps = MysqlUtils.getProperties()
     val resConf = ConfigFactory.load()
     val confTopic: String = resConf.getString("aliyun.KafkaTopics")
     val topics = Seq[String](confTopic)
     val group = resConf.getString("aliyun.KafkaGroup")
     val zkQuorums = resConf.getString("aliyun.ZKNodes")
     val brokerList = resConf.getString("aliyun.KafkaBrokers")
+    val esIdx = resConf.getString("aliyun.esIdx")
+    val esErrIdx = resConf.getString("aliyun.esErrIdx")
+    val esIdField = resConf.getString("aliyun.esIdField")
     val kafkaParams = Map[String, String](
       "metadata.broker.list" -> brokerList,
       "auto.offset.reset" -> "smallest",
@@ -51,6 +54,8 @@ object NewsStreaming {
       "es.port" -> "9200",
       "es.http.timeout" -> "2m",
       "es.mapping.id" -> ES_ID_KEY)
+
+    val news_mode_map = getNewsModeMap(commonProps)
     val sc = new SparkContext(conf)
     //    sc.setLogLevel("WARN")
     val ssc = new StreamingContext(sc, Seconds(60))
@@ -73,35 +78,44 @@ object NewsStreaming {
       offsetRanges = rdd.asInstanceOf[HasOffsetRanges].offsetRanges
       rdd
     }.map(_._2)
-      .foreachRDD(rdd => {
-        val minute = NewsProcess.getNowMinuteNo
-        val distance = Math.abs(minute - minuteBrdcst.value)
-        if (distance >= 10 && distance <= 50) { //至少间隔10分钟才更新
-          println(s"######## last_minute=${minuteBrdcst.value} current_minute=$minute minute distance: $distance")
-          minuteBrdcst.unpersist()
-          minuteBrdcst = ssc.sparkContext.broadcast[Int](minute)
-
-          println("####### update blacklist #######")
-          blacklistBrdcst =
-            ssc.sparkContext.broadcast[Array[String]](MysqlUtils.getBlackList(blacklistBrdcst))
-
-          println("####### update whitelist #######")
-          whitelistBrdcst
-            = ssc.sparkContext.broadcast[Array[String]](MysqlUtils.getSourceWhiteList(whitelistBrdcst))
-
-          println("####### update sense words #######")
-          senseWordsBrdcst =
-            ssc.sparkContext.broadcast[Array[String]](MysqlUtils.getSensetiveWords(senseWordsBrdcst))
-
-        }
+      .foreachRDD((rdd, time) => {
         if (!rdd.isEmpty()) {
-          rdd.foreachPartition(iter => {
-            try {
+          val minute = NewsProcess.getNowMinuteNo
+          val distance = Math.abs(minute - minuteBrdcst.value)
+          if (distance >= 10 && distance <= 50) { //至少间隔10分钟才更新
+            println(s"######## last_minute=${minuteBrdcst.value} current_minute=$minute minute distance: $distance")
+            minuteBrdcst.unpersist()
+            minuteBrdcst = ssc.sparkContext.broadcast[Int](minute)
 
-            } catch {
-              case ex: Exception => Log.error(ex.getMessage)
-            }
-          })
+            println("####### update blacklist #######")
+            blacklistBrdcst =
+              ssc.sparkContext.broadcast[Array[String]](MysqlUtils.getBlackList(blacklistBrdcst))
+
+            println("####### update whitelist #######")
+            whitelistBrdcst
+              = ssc.sparkContext.broadcast[Array[String]](MysqlUtils.getSourceWhiteList(whitelistBrdcst))
+
+            println("####### update sense words #######")
+            senseWordsBrdcst =
+              ssc.sparkContext.broadcast[Array[String]](MysqlUtils.getSensetiveWords(senseWordsBrdcst))
+          }
+          try {
+            val esRdd = rdd.mapPartitions(newsIter => {
+              mapPartitionsFunc(news_mode_map,
+                blacklistBrdcst,
+                whitelistBrdcst,
+                senseWordsBrdcst,
+                esIdx,
+                esErrIdx,
+                newsIter,
+                esIdField)
+            })
+            EsSpark.saveToEs(esRdd, s"{$ES_INDEX_KEY}/_doc", esOptions)
+            StreamingUtils.saveOffsets(offsetRanges, kafkaParams, zkQuorums)
+            println(s"========> $time <========")
+          } catch {
+            case ex: Exception => Log.error(ex.getMessage)
+          }
         }
       })
 
@@ -110,40 +124,39 @@ object NewsStreaming {
   }
 
   // 主要处理逻辑
-  private def mapPartitionsFunc(redis_task_prefix: String, news_mode_map: util.HashMap[String, Int],
-                                blacklistBrdcst: Broadcast[Array[String]], whitelistBrdcst: Broadcast[Array[String]],
-                                tags_rds_flg_Broadcast: Broadcast[Int], senseWordsBrdcst: Broadcast[Array[String]],
+  private def mapPartitionsFunc(news_mode_map: util.HashMap[String, Int],
+                                blacklistBrdcst: Broadcast[Array[String]],
+                                whitelistBrdcst: Broadcast[Array[String]],
+                                senseWordsBrdcst: Broadcast[Array[String]],
                                 ES_INDEX: String, ES_ERROR_INDEX: String,
-                                kvmessages: Iterator[String], article_min_words: Int,
-                                topic: String, id_field_name: String): Iterator[util.HashMap[String, Object]] = {
+                                kvmessages: Iterator[String],
+                                id_field_name: String): Iterator[util.HashMap[String, Object]] = {
     val redis = RedisClusterHelper.getConnection
     val messages = kvmessages.map(msg => {
-      //将数据转换成jsonNode格式，便于数据验证
+      // 将数据转换成jsonNode格式，便于数据验证
       val messageNode = JsonNodeUtils.getJsonNodeFromStringContent(msg).asInstanceOf[ObjectNode]
-      // 2. 验证article_genre
+      // 验证article_genre
       if (messageNode.hasNonNull("article_genre")) {
-        common_validate(messageNode, ES_INDEX, ES_ERROR_INDEX, redis, tags_rds_flg_Broadcast, article_min_words, topic)
+        // 添加 store_time , news_mode 信息
+        addExtraInfo(messageNode, news_mode_map)
+        common_validate(messageNode, ES_INDEX, ES_ERROR_INDEX)
       } else {
-        messageNode.put(ES_TYPE_KEY, "error_data_type")
         NewsProcess.addErrorInfo(messageNode, ES_ERROR_INDEX, "the field article_genre is Null!")
       }
-
       //验证黑名单白名单逻辑
       validateBWlist(ES_ERROR_INDEX, blacklistBrdcst, whitelistBrdcst, messageNode)
       //为数据生成es的id
       messageNode.put(Constant.ES_ID_KEY, produceRecordId(messageNode, ES_ERROR_INDEX, id_field_name))
-
-//      NewsProcess.processInvenoOptionFields(messageNode)
-      //替换旧字段
+      // TODO 替换旧字段！！！
       NewsProcess.renameFields(messageNode)
-
       //因为有替换字段的过程，最后要验证字段长度，应该在替换字段后进行
       //验证一些字段的长度限制url,tags,title,author
       NewsProcess.validate_fields_length(messageNode, ES_ERROR_INDEX)
       if (!messageNode.has(Constant.FIELD_ERROR_KEY)) {
-//        if (news_mode != -2) { //微博的不验证敏感词
-//          NewsProcess.addSensetiveInfo(messageNode, senseWordsBrdcst.value)
-//        }
+        val news_mode = messageNode.get("newsmode").asInt()
+        if (news_mode != -2) { //微博的不验证敏感词
+          NewsProcess.addSensetiveInfo(messageNode, senseWordsBrdcst.value)
+        }
         NewsProcess.addGrantLevelInfo(redis, messageNode)
       } else {
         messageNode.put(ES_INDEX_KEY, ES_ERROR_INDEX) //防止漏加错误索引
@@ -153,19 +166,52 @@ object NewsStreaming {
     messages
   }
 
-  protected def jsonNode2Map(messageNode: ObjectNode): util.HashMap[String, Object] = {
-    val objectMapper = new ObjectMapper
-    objectMapper.readValue(messageNode.toString, classOf[util.HashMap[String, Object]])
-  }
+  /**
+   * 常规验证逻辑
+   */
+  def common_validate(messageNode: ObjectNode, index: String, index_error: String): Unit = {
+    messageNode.remove("body")
+    val contenttext_node = NewsProcess.getFieldNode(messageNode, "parsed_content_main_body")
+    val s_img_lc_node = NewsProcess.getFieldNode(messageNode, "small_img_location")
+    val img_lc_node = NewsProcess.getFieldNode(messageNode, "img_location")
+    val publish_time_node = NewsProcess.getFieldNode(messageNode, "publish_time")
+    val timestamp_node = NewsProcess.getFieldNode(messageNode, "timestamp")
+    val article_genre = messageNode.get("article_genre").textValue()
+    val timestamp = messageNode.get("timestamp").textValue()
+    val publish_time = messageNode.get("publish_time").textValue()
+    // 按照当前月生成动态索引
+    NewsProcess.buildEsIndexOnMonth(messageNode, index, timestamp)
+    // 常规验证逻辑************************************************************************************//
+    if (timestamp_node == null) {
+      val now_time = NewsProcess.getNowTime
+      messageNode.put("timestamp", now_time)
+      NewsProcess.addErrorInfo(messageNode, index_error, "缺少timestamp字段！")
+    }
+    if (publish_time_node == null) {
+      val publish_time_nd = messageNode.get("publish_time")
+      println(s"### publish_time 为空 publish_time=$publish_time_node nd=${publish_time_nd.textValue()} ####")
+      messageNode.set("publish_time", messageNode.get("timestamp"))
+    }
+    if (!NewsProcess.chargeTimeField(messageNode, timestamp, publish_time, index_error, article_genre)) return
+    // 验证必须含有的字段
+    val error_msg = JsonNodeUtils.validateData(messageNode, Schemas.base_schema)
+    if (error_msg.trim.length > 0) {
+      NewsProcess.addErrorInfo(messageNode, index_error, error_msg)
+    }
+    // 验证复合类型字段
+    Schemas.based_arraytype_fields.foreach(field => {
+      if (!messageNode.has(field)) {
+        NewsProcess.addErrorInfo(messageNode, index_error, "field $field is needed ")
+      }
+    })
+    // 验证图集视频
+    NewsProcess.imgCommonTrans(messageNode, s_img_lc_node, "small_img_location", article_genre)
+    NewsProcess.imgCommonTrans(messageNode, img_lc_node, "img_location", article_genre)
+    NewsProcess.videoTrans(messageNode, "video_location", article_genre, index_error)
 
-  private def validateBWlist(ES_ERROR_INDEX: String,
-                             blacklistBrdcst: Broadcast[Array[String]],
-                             whitelistBrdcst: Broadcast[Array[String]], messageNode: ObjectNode): Unit = {
-    if (!messageNode.has(Constant.FIELD_ERROR_KEY)) {
-      //加上验证黑名单逻辑
-      NewsProcess.validateBlacklist(messageNode, blacklistBrdcst, ES_ERROR_INDEX)
-      //加上验证白名单逻辑
-      NewsProcess.validateWhitelist(messageNode, whitelistBrdcst, ES_ERROR_INDEX)
+    if (article_genre.startsWith("article")) { //验证article和article_video
+      //验证文章和文章视频
+      NewsProcess.validate_article(messageNode, index_error, contenttext_node)
     }
   }
 
@@ -184,60 +230,40 @@ object NewsStreaming {
     record_id
   }
 
-  // 常规验证逻辑
-  def common_validate(messageNode: ObjectNode, index: String, index_error: String, jedis: JedisCluster,
-                      tags_rds_flg_Broadcast: Broadcast[Int], article_min_words: Int, topic: String): Unit = {
-    messageNode.remove("body")
-    //将tags字段由数组类型转变为字符串类型 ！inveno不需要这个字段
-    NewsProcess.processTags(messageNode)
-    val content_node = NewsProcess.getFieldNode(messageNode, "parsed_content")
-    val contenttext_node = NewsProcess.getFieldNode(messageNode, "parsed_content_main_body")
-    val s_img_lc_node = NewsProcess.getFieldNode(messageNode, "small_img_location")
-    val img_lc_node = NewsProcess.getFieldNode(messageNode, "img_location")
-    var publish_time_node = NewsProcess.getFieldNode(messageNode, "publish_time")
-    val timestamp_node = NewsProcess.getFieldNode(messageNode, "timestamp")
+  /**
+   * 添加newsmode字段
+   */
+  def addExtraInfo(messageNode: ObjectNode, news_mode_map: util.HashMap[String, Int]): Unit = {
     val article_genre = messageNode.get("article_genre").textValue()
+    messageNode.put("newsmode", news_mode_map.get(article_genre))
+  }
 
-    if (timestamp_node == null) {
-      val now_time = NewsProcess.getNowTime()
-      messageNode.put("timestamp", now_time)
-      NewsProcess.addErrorInfo(messageNode, index_error, "缺少timestamp字段！")
-    }
-
-    if (publish_time_node == null) {
-      val publish_time_nd = messageNode.get("publish_time")
-      println(s"### publish_time 为空 publish_time=$publish_time_node nd=${publish_time_nd.textValue()} ####")
-      messageNode.set("publish_time", messageNode.get("timestamp"))
-    }
-
-    //设置小说标题
-    NewsProcess.setNovelTitle(messageNode, article_genre)
-
-    val timestamp = messageNode.get("timestamp").textValue()
-    //按照当前月生成动态索引
-    NewsProcess.buildEsIndexOnMonth(messageNode, index, timestamp)
-
-    val publish_time = messageNode.get("publish_time").textValue()
-    if (!NewsProcess.chargeTimeField(messageNode, timestamp, publish_time, index_error, article_genre)) return
-    //验证必须含有的字段
-    val error_msg = JsonNodeUtils.validateData(messageNode, Schemas.base_schema)
-    if (error_msg.trim.length > 0) {
-      NewsProcess.addErrorInfo(messageNode, index_error, error_msg)
-    }
-    //验证复合类型字段
-    Schemas.based_arraytype_fields.foreach(field => {
-      if (!messageNode.has(field)) {
-        NewsProcess.addErrorInfo(messageNode, index_error, "field $field is needed ")
-      }
+  /**
+   * 获取文章类型 article:1,gallery:2,video:3,ec:6,novel:7,cartoon:8,stock:-1,sports_live:11,ad:12,article_video:-999
+   */
+  def getNewsModeMap(properties: Properties): util.HashMap[String, Int] = {
+    val map = new util.HashMap[String, Int]()
+    val newsmode_str = properties.getProperty("news_mode")
+    newsmode_str.split(",").foreach(type_mode => {
+      val data = type_mode.split(":")
+      map.put(data(0), data(1).toInt)
     })
+    map
+  }
 
-    NewsProcess.imgCommonTrans(messageNode, s_img_lc_node, "small_img_location", article_genre)
-    NewsProcess.imgCommonTrans(messageNode, img_lc_node, "img_location", article_genre)
-    NewsProcess.videoTrans(messageNode, "video_location", article_genre, index_error)
-
-    if (article_genre.startsWith("article")) { //验证article和article_video
-      //验证文章和文章视频
-      NewsProcess.validate_article(messageNode, index_error, content_node, contenttext_node)
+  private def validateBWlist(ES_ERROR_INDEX: String,
+                             blacklistBrdcst: Broadcast[Array[String]],
+                             whitelistBrdcst: Broadcast[Array[String]], messageNode: ObjectNode): Unit = {
+    if (!messageNode.has(Constant.FIELD_ERROR_KEY)) {
+      //加上验证黑名单逻辑
+      NewsProcess.validateBlacklist(messageNode, blacklistBrdcst, ES_ERROR_INDEX)
+      //加上验证白名单逻辑
+      NewsProcess.validateWhitelist(messageNode, whitelistBrdcst, ES_ERROR_INDEX)
     }
+  }
+
+  protected def jsonNode2Map(messageNode: ObjectNode): util.HashMap[String, Object] = {
+    val objectMapper = new ObjectMapper
+    objectMapper.readValue(messageNode.toString, classOf[util.HashMap[String, Object]])
   }
 }

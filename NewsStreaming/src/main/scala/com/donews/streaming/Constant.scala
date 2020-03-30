@@ -7,7 +7,6 @@ object Constant {
   val FIELD_TYPE_STR: String = "str"
   val FIELD_TYPE_INT: String = "int"
   val ES_INDEX_KEY: String = "index_of_es"
-  val ES_TYPE_KEY: String = "type_of_es"
   val ES_ID_KEY: String = "record_id"
   val FIELD_ERROR_KEY: String = "error_message"
   final val LOCAL_TIME_ZONE = 8

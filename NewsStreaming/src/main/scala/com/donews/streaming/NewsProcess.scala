@@ -1,30 +1,63 @@
 package com.donews.streaming
 
-import java.time.{Instant, LocalDateTime, ZoneOffset}
+import java.time.LocalDateTime
 import java.util
-import java.util.{ArrayList => AList}
 
 import com.donews.streaming.Constant._
 import com.donews.utils._
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.node._
-import org.apache.spark.SparkContext
 import org.apache.spark.broadcast.Broadcast
-import org.elasticsearch.spark.rdd.EsSpark
 import redis.clients.jedis.JedisCluster
-
-import scala.collection.JavaConversions._
-import scala.collection.JavaConverters._
-import scala.collection.mutable.ArrayBuffer
 
 
 object NewsProcess {
   val replaceOldFields = new java.util.ArrayList[String](util.Arrays.asList("data_source_id", "parsed_content",
     "parsed_content_main_body", "media", "id", "info_source",
-    "publish_time", "small_img_location", "small_img_location_count", "news_mode",
-    "img_location", "img_location_count", "video_location", "video_location_count", "url", "article_genre", "comment_count",
+    "publish_time", "newsmode", "url", "article_genre", "comment_count",
     "click_count", "like_count", "data_source_sub_id", "sub_channel", "_id", "repost_count"))
 
+  def getNowTime: String = {
+    var now_time = LocalDateTime.now().toString
+    if (now_time.length >= 20) {
+      now_time = now_time.substring(0, 19)
+    }
+    now_time
+  }
+
+  def getNowMinuteNo: Int = {
+    getNowTime.substring(14, 16).toInt
+  }
+
+  def buildEsIndexOnMonth(messageNode: ObjectNode, index: String, timestamp: String): Unit = {
+    val y_month = timestamp.substring(0, 7)
+    val es_index = s"${index}_$y_month"
+    messageNode.put(ES_INDEX_KEY, es_index)
+  }
+
+  def getFieldNode(messageNode: ObjectNode, obj_type_field: String): JsonNode = {
+    val field_node = messageNode.get(obj_type_field)
+    if (null == field_node || field_node.getNodeType.equals(JsonNodeType.NULL)) null else field_node
+  }
+
+  def getStrField(messageNode: ObjectNode, fieldName: String): String = {
+    val field_node = getFieldNode(messageNode, fieldName)
+    var field_value: String = ""
+    if (field_node != null) {
+      field_value = field_node.textValue()
+    }
+    field_value
+  }
+
+  def addErrorInfo(messageNode: ObjectNode, error_index: String, error_msg: String): Unit = {
+    var error_message: String = error_msg
+    messageNode.put(Constant.ES_INDEX_KEY, error_index)
+    if (messageNode.hasNonNull(Constant.FIELD_ERROR_KEY)) {
+      val last_error_msg = messageNode.get(Constant.FIELD_ERROR_KEY).textValue()
+      error_message += " || " + last_error_msg
+    }
+    messageNode.put(Constant.FIELD_ERROR_KEY, error_message)
+  }
 
   /**
    * 替换字段
@@ -33,51 +66,29 @@ object NewsProcess {
   def renameFields(messageNode: ObjectNode) {
     // inveno field 转换
     messageNode.set("link", messageNode.get("response_url"))
-    messageNode.set("pubDate", messageNode.get("publish_time"))
     messageNode.set("content", messageNode.get("parsed_content"))
+    messageNode.set("pubDate", messageNode.get("publish_time"))
+    messageNode.set("ctime", messageNode.get("timestamp"))
+    messageNode.set("mode", messageNode.get("article_genre"))
     messageNode.set("source", messageNode.get("channel"))
     messageNode.set("sourcesubname", messageNode.get("sub_channel"))
     messageNode.set("datasourcetype", messageNode.get("data_source_type"))
     messageNode.set("datasourcesubid", messageNode.get("data_source_sub_id"))
     messageNode.set("datasourceid", messageNode.get("data_source_id"))
-    messageNode.set("ctime", messageNode.get("timestamp"))
-    messageNode.set("mode", messageNode.get("article_genre"))
     //**********************************************************************/
     //    messageNode.set("contenttext", messageNode.get("parsed_content_main_body"))
     //    messageNode.set("source", messageNode.get("media"))
     //    messageNode.set("sourceurl", messageNode.get("id"))
-    //    messageNode.set("thumbnailimglists", messageNode.get("small_img_location"))
-    //    messageNode.set("coverthumbnailimglists", messageNode.get("img_location"))
     //    messageNode.set("imglists", messageNode.get("img_location"))
     //    messageNode.set("videolists", messageNode.get("video_location"))
     //替换换url的工作应适配于所有数据，包括正确，错误,已经单独提出去了
-    messageNode.set("shareurl", messageNode.get("url"))
-    messageNode.set("newsmode", messageNode.get("news_mode"))
-    messageNode.set("commentcount", messageNode.get("comment_count"))
-    messageNode.set("likecount", messageNode.get("click_count"))
-    if (!messageNode.has("imgcount")) {
-      messageNode.set("imgcount", messageNode.get("small_img_location_count"))
-    }
-    produceKeywords(messageNode) //产生keyword字段
-    val videotime_node = getFieldNode(messageNode, "videotime")
-    if (videotime_node == null) {
-      messageNode.put("videotime", 0) //videotime
-    }
+    //    messageNode.set("shareurl", messageNode.get("url"))
+    //    val videotime_node = getFieldNode(messageNode, "videotime")
+    //    if (videotime_node == null) {
+    //      messageNode.put("videotime", 0) //videotime
+    //    }
     //删掉老字段
     messageNode.remove(replaceOldFields)
-  }
-
-  def produceKeywords(messageNode: ObjectNode): Unit = {
-    if (!messageNode.has("keywords")) {
-      val tags_nd = getFieldNode(messageNode, "tags")
-      if (tags_nd != null && !tags_nd.textValue().trim.equals("")) {
-        val news_tags = tags_nd.textValue().trim.replaceAll(":0\\.\\d+| +", "")
-        messageNode.put("keywords", news_tags)
-      } else {
-        messageNode.put("keywords", "")
-      }
-    }
-
   }
 
   /**
@@ -100,7 +111,6 @@ object NewsProcess {
     }
     is_valid
   }
-
 
   /**
    * 验证timestamp,publish_time两个字段,以及比较他们的值
@@ -142,33 +152,10 @@ object NewsProcess {
     is_valid
   }
 
-  def getNowTime: String = {
-    var now_time = LocalDateTime.now().toString
-    if (now_time.length >= 20) {
-      now_time = now_time.substring(0, 19)
-    }
-    now_time
-  }
-
-  def getNowMinuteNo: Int = {
-    getNowTime.substring(14, 16).toInt
-  }
-
-  def buildEsIndexOnMonth(messageNode: ObjectNode, index: String, timestamp: String): Unit = {
-    //正确数据的索引
-    val y_month = timestamp.substring(0, 7)
-    val es_index = s"${index}_$y_month"
-    messageNode.put(ES_INDEX_KEY, es_index)
-
-  }
-
-  def getQuchongValue: String = {
-    val quchong = MysqlUtils.getProperties().getProperty("quchong")
-    quchong
-  }
-
-  def validate_article(messageNode: ObjectNode, error_index: String,
-                       content_node: JsonNode, contenttext_node: JsonNode): Unit = {
+  /**
+   * 验证文章正文
+   */
+  def validate_article(messageNode: ObjectNode, error_index: String, contenttext_node: JsonNode): Unit = {
     val ctnt_count_node = getFieldNode(messageNode, "parsed_content_char_count")
     var ct_count: Int = 0
     if (null != ctnt_count_node) {
@@ -184,133 +171,6 @@ object NewsProcess {
       }
     }
   }
-
-
-  //tags值的样例 "tags": "养猪业:0.4648,生猪:0.3422,我国:0.3179,猪场:0.2138,动物福利:0.2114"
-  def getTagsIndex(tags: String): Int = {
-    val first_tag = tags.split(":")(0)
-    Math.abs(first_tag.hashCode) % TAGS_KEY_ARR_NUM
-  }
-
-  def nvalidate_similary(messageNode: ObjectNode, extractTags: String, error_index: String, jedis: JedisCluster, tags_rds_flg_Broadcast: Broadcast[Int]): Unit = {
-    val tags_rds_flag = tags_rds_flg_Broadcast.value
-    val tags_index = getTagsIndex(extractTags)
-    val redis_key = s"$RDS_SIMI_TAGS_PREFIX:$tags_index:$tags_rds_flag"
-    if (jedis.exists(redis_key)) {
-      val tags_list = jedis.lrange(redis_key, 0, -1)
-      val tags_iter = tags_list.iterator()
-      var need_iter: Boolean = true
-      while (need_iter && tags_iter.hasNext) {
-        val old_tag_and_index_str = tags_iter.next()
-        val values_arr = old_tag_and_index_str.split("--")
-        val old_tag = values_arr(0)
-        val data_index = values_arr(1)
-        val similarScore = GNewsUtil.similarity(old_tag, extractTags)
-        val score_threshold = getScoreThreshold
-        if (similarScore >= score_threshold) {
-          addErrorInfo(messageNode, error_index, s"文章与 _id=$data_index 的数据相似度> $score_threshold")
-          //找到过去一条相似的即可
-          need_iter = false
-        }
-      }
-    }
-  }
-
-  private def getScoreThreshold: Float = {
-    val score_str = MysqlUtils.getProperties().getProperty("similar_score")
-    score_str.toFloat
-  }
-
-  def getChannel(messageNode: ObjectNode): String = {
-    var channel = getStrField(messageNode, "channel")
-    if (channel.trim.length <= 0) channel = "kong"
-    channel
-  }
-
-  def getStrField(messageNode: ObjectNode, fieldName: String): String = {
-    val field_node = getFieldNode(messageNode, fieldName)
-    var field_value: String = ""
-    if (field_node != null) {
-      field_value = field_node.textValue()
-    }
-    field_value
-  }
-
-  //将tags字段由数组类型转变为字符串类型
-  def processTags(messageNode: ObjectNode): Unit = {
-    var tags_str: String = ""
-    val tagNode = getFieldNode(messageNode, "tags")
-    if (tagNode != null) {
-      tags_str = tagNode.toString.replaceAll("[\"\\[\\]]", "")
-      //将原始的非空tags字符串作为keywords
-      //最后验证完的数据还没有keywords字段，需要用算法算出的tags，去掉分值，作为keywords值
-      if (tags_str.trim.nonEmpty)
-        messageNode.put("keywords", tags_str)
-    }
-    messageNode.put("tags", tags_str)
-  }
-
-  /**
-   * inveno开头的字符串都加入option字段中
-   */
-  /*def processInvenoOptionFields(messageNode: ObjectNode): Unit = {
-    val option_node = new ObjectNode(JsonNodeFactory.instance)
-    val fieldNames = messageNode.fieldNames()
-    val remove_fields = new ArrayBuffer[String]
-    while (fieldNames.hasNext) {
-      val fieldName = fieldNames.next()
-      //inveno开头的字符串都加入option字段中
-      if (fieldName.startsWith("inveno_")) {
-        option_node.set(fieldName, messageNode.get(fieldName))
-        remove_fields.append(fieldName)
-      }
-    }
-    //季家震需求
-    //add by liudh at 2020-03-10 将video_location等字段，拷贝到inveno_info中
-    //后续可能还会加字段，为了尽量不改动代码，将其做成配置
-    val copy_fields_str = MysqlUtils.getProperties().getProperty("inveno_copy_fields")
-    val copy_fields = copy_fields_str.split(",")
-    copy_fields.foreach { field =>
-      if (messageNode.has(field)) {
-        option_node.put(field, messageNode.get(field).toString)
-      }
-    }
-
-    messageNode.put("invenoinfo", option_node.toString)
-    messageNode.remove(remove_fields)
-  }*/
-
-  def setNovelTitle(messageNode: ObjectNode, article_genre: String): Unit = {
-    if ("novel".equals(article_genre)) {
-      val title_node = NewsProcess.getFieldNode(messageNode, "title")
-      val info_source_node = NewsProcess.getFieldNode(messageNode, "info_source")
-      if (null != title_node && null != info_source_node) {
-        messageNode.put("title", info_source_node.textValue() + " " + title_node.textValue())
-      }
-    }
-
-  }
-
-  def setGalleryVideoContenttext(messageNode: ObjectNode, article_genre: String): Unit = {
-    if ("gallery".equals(article_genre) || "video".equals(article_genre)) {
-      messageNode.put("parsed_content", "")
-      messageNode.put("parsed_content_main_body", "")
-    }
-
-  }
-
-
-  //验证一些字段的长度限制
-  def validate_fields_length(messageNode: ObjectNode, error_index: String): Unit = {
-    validate_field_len(messageNode, "shareurl", error_index, 330)
-    processTitle(messageNode) //去除title两端的空格
-    validate_field_len(messageNode, "title", error_index, 100)
-    validate_field_len(messageNode, "keywords", error_index, 500)
-    validate_field_len(messageNode, "author", error_index, 100)
-    validate_field_len(messageNode, "contenttext", error_index, Constant.LONGTEXT_LENGTH)
-    validate_field_len(messageNode, "content", error_index, Constant.MEDIUMTEXT_LENGTH)
-  }
-
 
   def processTitle(messageNode: ObjectNode): Unit = {
     val title_node = getFieldNode(messageNode, "title")
@@ -329,7 +189,16 @@ object NewsProcess {
         }
       }
     }
+  }
 
+  def validate_fields_length(messageNode: ObjectNode, error_index: String): Unit = {
+    validate_field_len(messageNode, "shareurl", error_index, 330)
+    processTitle(messageNode) //去除title两端的空格
+    validate_field_len(messageNode, "title", error_index, 100)
+    validate_field_len(messageNode, "keywords", error_index, 500)
+    validate_field_len(messageNode, "author", error_index, 100)
+    validate_field_len(messageNode, "contenttext", error_index, Constant.LONGTEXT_LENGTH)
+    validate_field_len(messageNode, "content", error_index, Constant.MEDIUMTEXT_LENGTH)
   }
 
   def validate_field_len(messageNode: ObjectNode, field_name: String, error_index: String, max_len: Double): Unit = {
@@ -344,44 +213,21 @@ object NewsProcess {
     var length: Int = 0
     if (null != node) {
       val field_value = node.textValue()
-      //按照字数个数算长度
       length = field_value.length
     }
     length
   }
 
-  def validate_video(messageNode: ObjectNode, error_index: String): Unit = {
-    val vd_count_node = messageNode.get("video_location_count")
-    var vd_count = 0
-    if (!vd_count_node.getNodeType.equals(JsonNodeType.NULL)) {
-      vd_count = vd_count_node.toString.toInt
-    }
-
-  }
-
-  def getCountTypeField(messageNode: ObjectNode, count_field_name: String): Int = {
-    val count_node = messageNode.get(count_field_name)
-    var count = 0
-    if (null != count_node && !count_node.getNodeType.equals(JsonNodeType.NULL)) {
-      count = count_node.toString.toInt
-    }
-    count
-  }
-
-
-  /**
-   *
-   */
   def imgCommonTrans(messageNode: ObjectNode, img_location: JsonNode, img_field: String, genre: String): Unit = {
     if (img_location != null) {
       val new_list_nodes = new ArrayNode(JsonNodeFactory.instance)
       val img_list_nodes = img_location.asInstanceOf[ArrayNode].elements()
-      val img_task_processor_img_list_nodes = new ArrayNode(JsonNodeFactory.instance)
-
       var index: Int = 0 //只截取100张
       while (img_list_nodes.hasNext && index < 100) {
         val img_node = img_list_nodes.next().asInstanceOf[ObjectNode]
-        processImgNode(img_node)
+        // TODO 不需要转换字段！！！
+        // processImgNode(img_node)
+        img_node.remove("bucket_name")
         if (0 == index) {
           val filepath = getFieldNode(img_node, "filepath")
           if (filepath != null && filepath.textValue().toLowerCase.endsWith("webp")) {
@@ -389,15 +235,14 @@ object NewsProcess {
             messageNode.put("datavalid", 7)
           }
         }
-
         new_list_nodes.add(img_node)
         index = index + 1
       }
       //处理imgcount字段
       if (genre.equals("gallery") && img_field.equals("img_location")) {
-        messageNode.put("imgcount", new_list_nodes.size())
+        messageNode.put("img_location_count", new_list_nodes.size())
       } else if (!genre.equals("video") && !genre.equals("gallery") && img_field.equals("small_img_location")) { //video类型数据不做处理
-        messageNode.put("imgcount", new_list_nodes.size())
+        messageNode.put("small_img_location_count", new_list_nodes.size())
       }
       if (index > 0)
         messageNode.set(img_field, new_list_nodes)
@@ -406,18 +251,7 @@ object NewsProcess {
     } else messageNode.set(img_field, null)
   }
 
-  def addErrorInfo(messageNode: ObjectNode, error_index: String, error_msg: String): Unit = {
-    var error_message: String = error_msg
-    messageNode.put(Constant.ES_INDEX_KEY, error_index)
-    if (messageNode.hasNonNull(Constant.FIELD_ERROR_KEY)) {
-      val last_error_msg = messageNode.get(Constant.FIELD_ERROR_KEY).textValue()
-      error_message += " || " + last_error_msg
-    }
-    messageNode.put(Constant.FIELD_ERROR_KEY, error_message)
-  }
-
   def videoTrans(messageNode: ObjectNode, video_field: String, genre: String, error_index: String): Unit = {
-
     val video_location = NewsProcess.getFieldNode(messageNode, video_field)
     if (video_location == null) {
       if ("video".equals(genre)) {
@@ -426,7 +260,6 @@ object NewsProcess {
       messageNode.set(video_field, null)
     } else {
       val vd_list_nodes = video_location.asInstanceOf[ArrayNode].elements()
-
       var index = 0
       while (vd_list_nodes.hasNext) {
         val vd_node = vd_list_nodes.next().asInstanceOf[ObjectNode]
@@ -442,12 +275,10 @@ object NewsProcess {
             if (duration < 5) {
               addErrorInfo(messageNode, error_index, "视频长度小于5秒！")
             }
-
           }
-
-          //          messageNode.put("videotime",)
         }
-        processVideoNode(vd_node)
+        // processVideoNode(vd_node)
+        vd_node.remove("bucket_name")
         index = index + 1
       }
       if (index == 0) {
@@ -460,55 +291,25 @@ object NewsProcess {
    *
    */
   def processImgNode(img_node: ObjectNode): Unit = {
-    img_node.remove("img_index")
-    processImgVideoSubNode(img_node, "img_path", "filepath", Constant.FIELD_TYPE_STR)
-    processImgVideoSubNode(img_node, "img_src", "shareurl", Constant.FIELD_TYPE_STR)
-    processImgVideoSubNode(img_node, "img_desc", "title", Constant.FIELD_TYPE_STR)
-    processImgVideoSubNode(img_node, "img_width", "width", Constant.FIELD_TYPE_INT)
-    processImgVideoSubNode(img_node, "img_height", "height", Constant.FIELD_TYPE_INT)
+    img_node.remove("bucket_name")
+    //    processImgVideoSubNode(img_node, "img_path", "filepath", Constant.FIELD_TYPE_STR)
+    //    processImgVideoSubNode(img_node, "img_src", "shareurl", Constant.FIELD_TYPE_STR)
+    //    processImgVideoSubNode(img_node, "img_desc", "title", Constant.FIELD_TYPE_STR)
+    //    processImgVideoSubNode(img_node, "img_width", "width", Constant.FIELD_TYPE_INT)
+    //    processImgVideoSubNode(img_node, "img_height", "height", Constant.FIELD_TYPE_INT)
   }
 
   /**
    *
    */
   def processVideoNode(video_node: ObjectNode): Unit = {
-    video_node.remove("video_index")
-    processImgVideoSubNode(video_node, "video_desc", "content", Constant.FIELD_TYPE_STR)
-    processImgVideoSubNode(video_node, "video_src", "shareurl", Constant.FIELD_TYPE_STR)
-    processImgVideoSubNode(video_node, "video_path", "filepath", Constant.FIELD_TYPE_STR)
-    processImgVideoSubNode(video_node, "video_duration", "duration", Constant.FIELD_TYPE_STR)
-    processImgVideoSubNode(video_node, "video_width", "videowidth", Constant.FIELD_TYPE_STR)
-    processImgVideoSubNode(video_node, "video_height", "videoheight", Constant.FIELD_TYPE_STR)
-  }
-
-  def processImgVideoSubNode(img_video_node: ObjectNode, old_field: String, new_field: String, field_value_type: String): Unit = {
-    val sub_field_node = ensureExistSubNode(img_video_node, old_field)
-    if (sub_field_node == null) {
-      if (field_value_type.equals(Constant.FIELD_TYPE_STR))
-        img_video_node.put(new_field, "")
-      else img_video_node.put(new_field, 0)
-    } else
-      img_video_node.set(new_field, sub_field_node)
-    img_video_node.remove(old_field) //删除原有的老的字字段
-
-
-  }
-
-  private def getArrayNode(messageNode: ObjectNode, fieldName: String): ArrayNode = {
-    val field_node = messageNode.get(fieldName)
-    if (null == field_node || field_node.getNodeType.equals(JsonNodeType.NULL)) null else field_node.asInstanceOf[ArrayNode]
-  }
-
-
-
-  def ensureExistSubNode(node: ObjectNode, sub_field: String): JsonNode = {
-    val sub_node = node.get(sub_field)
-    if (null == sub_node || JsonNodeType.NULL.equals(sub_node.getNodeType)) null else sub_node
-  }
-
-  def getFieldNode(messageNode: ObjectNode, obj_type_field: String): JsonNode = {
-    val field_node = messageNode.get(obj_type_field)
-    if (null == field_node || field_node.getNodeType.equals(JsonNodeType.NULL)) null else field_node
+    video_node.remove("bucket_name")
+    //    processImgVideoSubNode(video_node, "video_desc", "content", Constant.FIELD_TYPE_STR)
+    //    processImgVideoSubNode(video_node, "video_src", "shareurl", Constant.FIELD_TYPE_STR)
+    //    processImgVideoSubNode(video_node, "video_path", "filepath", Constant.FIELD_TYPE_STR)
+    //    processImgVideoSubNode(video_node, "video_duration", "duration", Constant.FIELD_TYPE_STR)
+    //    processImgVideoSubNode(video_node, "video_width", "videowidth", Constant.FIELD_TYPE_STR)
+    //    processImgVideoSubNode(video_node, "video_height", "videoheight", Constant.FIELD_TYPE_STR)
   }
 
   def validateBlacklist(messageNode: ObjectNode,
@@ -545,8 +346,153 @@ object NewsProcess {
     }
   }
 
+  /**
+   * add by shenhuayu at 2019-03-06 加上授权状态和评分字段
+   */
+  def addGrantLevelInfo(jedisCluster: JedisCluster, messageNode: ObjectNode): Unit = {
+    val info_source_id_prefix = getStrField(messageNode, "info_source_id_prefix")
+    val info_source_prefix = getStrField(messageNode, "info_source_prefix")
+    val data_source_unique_id = getStrField(messageNode, "data_source_unique_id")
+    val idGroup = s"$info_source_id_prefix@$info_source_prefix@$data_source_unique_id"
+    val v = jedisCluster.hget("H_news", idGroup)
+    val score = if (v != null) v else "-1@-1"
+    val Array(grant, level) = score.split("@")
+    messageNode.put("grant", grant)
+    //    messageNode.put("level", level)
+  }
 
-  def querryOldTags(sc: SparkContext, options: Map[String, String], tags_rds_flg_Broadcast: Broadcast[Int]): Broadcast[Map[String, AList[String]]] = {
+  private def checkContainsWordsGrp(text: String, words_grp: String): Boolean = {
+    val words_arr = words_grp.split("#")
+    var sensitive: Boolean = true //设置初始状态，使得可以进入while循环
+    val iter = words_arr.iterator
+    //判定text敏感条件：必须包含words_arr中所有关键词，一旦找到text其中一个关键词，则判定text为不敏感
+    while (iter.hasNext && sensitive) {
+      sensitive = text.contains(iter.next())
+    }
+    sensitive
+  }
+
+  def addSensetiveInfo(messageNode: ObjectNode, senseWords: Array[String]): Unit = {
+    val iter = senseWords.iterator
+    var sense_word_get: Boolean = false
+    val title = messageNode.get("title").asText("")
+    val content = messageNode.get("content").asText("")
+    val sense_node = new ObjectNode(JsonNodeFactory.instance)
+
+    while (iter.hasNext && !sense_word_get) {
+      val words = iter.next()
+      val title_sense = checkContainsWordsGrp(title, words)
+      var content_sense: Boolean = false //默认内容不包含敏感词，并且按需查询，提升效率
+      if (title_sense) {
+        sense_node.put("title", words)
+        messageNode.put("datavalid", 8)
+      } else {
+        //        content_sense = content.contains(word)
+        content_sense = checkContainsWordsGrp(content, words)
+        if (content_sense) {
+          sense_node.put("body", words)
+          messageNode.put("datavalid", 9)
+        }
+      }
+      sense_word_get = title_sense || content_sense
+    }
+
+    messageNode.put("contenttext", sense_node.toString)
+  }
+
+  def processImgVideoSubNode(img_video_node: ObjectNode, old_field: String, new_field: String, field_value_type: String): Unit = {
+    val sub_field_node = ensureExistSubNode(img_video_node, old_field)
+    if (sub_field_node == null) {
+      if (field_value_type.equals(Constant.FIELD_TYPE_STR))
+        img_video_node.put(new_field, "")
+      else img_video_node.put(new_field, 0)
+    } else
+      img_video_node.set(new_field, sub_field_node)
+    img_video_node.remove(old_field) //删除原有的老的字字段
+  }
+
+  def ensureExistSubNode(node: ObjectNode, sub_field: String): JsonNode = {
+    val sub_node = node.get(sub_field)
+    if (null == sub_node || JsonNodeType.NULL.equals(sub_node.getNodeType)) null else sub_node
+  }
+
+  // 注释内容**********************************************************************************************************//
+
+  /**
+   * inveno开头的字符串都加入option字段中
+   */
+  /*def processInvenoOptionFields(messageNode: ObjectNode): Unit = {
+    val option_node = new ObjectNode(JsonNodeFactory.instance)
+    val fieldNames = messageNode.fieldNames()
+    val remove_fields = new ArrayBuffer[String]
+    while (fieldNames.hasNext) {
+      val fieldName = fieldNames.next()
+      //inveno开头的字符串都加入option字段中
+      if (fieldName.startsWith("inveno_")) {
+        option_node.set(fieldName, messageNode.get(fieldName))
+        remove_fields.append(fieldName)
+      }
+    }
+    //季家震需求
+    //add by liudh at 2020-03-10 将video_location等字段，拷贝到inveno_info中
+    //后续可能还会加字段，为了尽量不改动代码，将其做成配置
+    val copy_fields_str = MysqlUtils.getProperties().getProperty("inveno_copy_fields")
+    val copy_fields = copy_fields_str.split(",")
+    copy_fields.foreach { field =>
+      if (messageNode.has(field)) {
+        option_node.put(field, messageNode.get(field).toString)
+      }
+    }
+
+    messageNode.put("invenoinfo", option_node.toString)
+    messageNode.remove(remove_fields)
+  }*/
+
+  /*private def getArrayNode(messageNode: ObjectNode, fieldName: String): ArrayNode = {
+    val field_node = messageNode.get(fieldName)
+    if (null == field_node || field_node.getNodeType.equals(JsonNodeType.NULL)) null else field_node.asInstanceOf[ArrayNode]
+  }*/
+
+  /*def getCountTypeField(messageNode: ObjectNode, count_field_name: String): Int = {
+    val count_node = messageNode.get(count_field_name)
+    var count = 0
+    if (null != count_node && !count_node.getNodeType.equals(JsonNodeType.NULL)) {
+      count = count_node.toString.toInt
+    }
+    count
+  }*/
+
+  /*def validate_video(messageNode: ObjectNode, error_index: String): Unit = {
+    val vd_count_node = messageNode.get("video_location_count")
+    var vd_count = 0
+    if (!vd_count_node.getNodeType.equals(JsonNodeType.NULL)) {
+      vd_count = vd_count_node.toString.toInt
+    }
+  }*/
+
+  /*def getTagsIndex(tags: String): Int = {
+    val first_tag = tags.split(":")(0)
+    Math.abs(first_tag.hashCode) % TAGS_KEY_ARR_NUM
+  }*/
+
+  /*  def produceKeywords(messageNode: ObjectNode): Unit = {
+    if (!messageNode.has("keywords")) {
+      val tags_nd = getFieldNode(messageNode, "tags")
+      if (tags_nd != null && !tags_nd.textValue().trim.equals("")) {
+        val news_tags = tags_nd.textValue().trim.replaceAll(":0\\.\\d+| +", "")
+        messageNode.put("keywords", news_tags)
+      } else {
+        messageNode.put("keywords", "")
+      }
+    }
+  }*/
+
+  /*def getQuchongValue: String = {
+    val quchong = MysqlUtils.getProperties().getProperty("quchong")
+    quchong
+  }*/
+
+  /*def querryOldTags(sc: SparkContext, options: Map[String, String], tags_rds_flg_Broadcast: Broadcast[Int]): Broadcast[Map[String, AList[String]]] = {
     val nowDateTime: LocalDateTime = LocalDateTime.now
     //获取两天内 article tags
     val now = nowDateTime.toString.substring(0, 19)
@@ -604,15 +550,14 @@ object NewsProcess {
     val keys_iter = tags_map.keySet.iterator
     val tags_map_broadCast = sc.broadcast[Map[String, AList[String]]](tags_map)
     tags_map_broadCast
-  }
+  }*/
 
-  // 返回天数
-  private def get_similar_data_days(): Int = {
+  /*private def get_similar_data_days(): Int = {
     val days_str = MysqlUtils.getProperties().getProperty("similar_data_days")
     days_str.toInt
-  }
+  }*/
 
-  def nquerryOldTags(sc: SparkContext, options: Map[String, String], tags_rds_flg_Broadcast: Broadcast[Int]): Unit = {
+  /*def nquerryOldTags(sc: SparkContext, options: Map[String, String], tags_rds_flg_Broadcast: Broadcast[Int]): Unit = {
     val nowDateTime: LocalDateTime = LocalDateTime.now
     val days = get_similar_data_days()
     //获取两天内 article tags
@@ -670,65 +615,35 @@ object NewsProcess {
         jedis.expire(redis_key, 15 * 60) //key的有效时间15分钟
       }
     }
-  }
+  }*/
 
-
-  def addSensetiveInfo(messageNode: ObjectNode, senseWords: Array[String]): Unit = {
-    val iter = senseWords.iterator
-    var sense_word_get: Boolean = false
-    val title = messageNode.get("title").asText("")
-    val content = messageNode.get("content").asText("")
-    val sense_node = new ObjectNode(JsonNodeFactory.instance)
-
-    while (iter.hasNext && !sense_word_get) {
-      val words = iter.next()
-      val title_sense = checkContainsWordsGrp(title, words)
-      var content_sense: Boolean = false //默认内容不包含敏感词，并且按需查询，提升效率
-      if (title_sense) {
-        sense_node.put("title", words)
-        messageNode.put("datavalid", 8)
-      } else {
-        //        content_sense = content.contains(word)
-        content_sense = checkContainsWordsGrp(content, words)
-        if (content_sense) {
-          sense_node.put("body", words)
-          messageNode.put("datavalid", 9)
-        }
+  /*def nvalidate_similary(messageNode: ObjectNode, extractTags: String, error_index: String, jedis: JedisCluster, tags_rds_flg_Broadcast: Broadcast[Int]): Unit = {
+  val tags_rds_flag = tags_rds_flg_Broadcast.value
+  val tags_index = getTagsIndex(extractTags)
+  val redis_key = s"$RDS_SIMI_TAGS_PREFIX:$tags_index:$tags_rds_flag"
+  if (jedis.exists(redis_key)) {
+    val tags_list = jedis.lrange(redis_key, 0, -1)
+    val tags_iter = tags_list.iterator()
+    var need_iter: Boolean = true
+    while (need_iter && tags_iter.hasNext) {
+      val old_tag_and_index_str = tags_iter.next()
+      val values_arr = old_tag_and_index_str.split("--")
+      val old_tag = values_arr(0)
+      val data_index = values_arr(1)
+      val similarScore = GNewsUtil.similarity(old_tag, extractTags)
+      val score_threshold = getScoreThreshold
+      if (similarScore >= score_threshold) {
+        addErrorInfo(messageNode, error_index, s"文章与 _id=$data_index 的数据相似度> $score_threshold")
+        //找到过去一条相似的即可
+        need_iter = false
       }
-      sense_word_get = title_sense || content_sense
     }
-
-    messageNode.put("contenttext", sense_node.toString)
   }
+}*/
 
-
-  private def checkContainsWordsGrp(text: String, words_grp: String): Boolean = {
-    val words_arr = words_grp.split("#")
-    var sensitive: Boolean = true //设置初始状态，使得可以进入while循环
-    val iter = words_arr.iterator
-    //判定text敏感条件：必须包含words_arr中所有关键词，一旦找到text其中一个关键词，则判定text为不敏感
-    while (iter.hasNext && sensitive) {
-      sensitive = text.contains(iter.next())
-    }
-    sensitive
-
-  }
-
-
-  /**
-   * add by shenhuayu at 2019-03-06 加上授权状态和评分字段
-   */
-  def addGrantLevelInfo(jedisCluster: JedisCluster, messageNode: ObjectNode): Unit = {
-    val info_source_id_prefix = getStrField(messageNode, "info_source_id_prefix")
-    val info_source_prefix = getStrField(messageNode, "info_source_prefix")
-    val data_source_unique_id = getStrField(messageNode, "data_source_unique_id")
-    val idGroup = s"$info_source_id_prefix@$info_source_prefix@$data_source_unique_id"
-    val v = jedisCluster.hget("H_news", idGroup)
-    val score = if (v != null) v else "-1@-1"
-    val Array(grant, level) = score.split("@")
-    messageNode.put("grant", grant)
-    messageNode.put("level", level)
-  }
-
+  /*private def getScoreThreshold: Float = {
+    val score_str = MysqlUtils.getProperties().getProperty("similar_score")
+    score_str.toFloat
+  }*/
 
 }
