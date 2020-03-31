@@ -2,7 +2,6 @@ package com.donews.streaming
 
 import java.time.{LocalDate, LocalDateTime}
 import java.util
-import java.util.Properties
 
 import com.donews.streaming.Constant._
 import com.donews.utils._
@@ -21,7 +20,6 @@ object NewsStreaming {
   val Log: Logger = LoggerFactory.getLogger(getClass)
 
   def main(args: Array[String]): Unit = {
-    val commonProps = MysqlUtils.getProperties()
     val resConf = ConfigFactory.load()
     val confTopic: String = resConf.getString("aliyun.KafkaTopics")
     val topics = Seq[String](confTopic)
@@ -39,7 +37,7 @@ object NewsStreaming {
       "fetch.message.max.bytes" -> s"${15 * 1024 * 1024}"
     )
     val conf = new SparkConf()
-      .setAppName(getClass.getSimpleName)
+      .setAppName("InvenoNewsStreaming")
       .set("spark.serializer", "org.apache.spark.serializer.KryoSerializer") // Kryo
       .set("spark.streaming.stopGracefullyOnShutdown", "true") // 优雅的关闭
       .set("spark.streaming.backpressure.enabled", "true") // 激活削峰功能
@@ -55,7 +53,6 @@ object NewsStreaming {
       "es.http.timeout" -> "2m",
       "es.mapping.id" -> ES_ID_KEY)
 
-    val news_mode_map = getNewsModeMap(commonProps)
     val sc = new SparkContext(conf)
     //    sc.setLogLevel("WARN")
     val ssc = new StreamingContext(sc, Seconds(60))
@@ -101,14 +98,8 @@ object NewsStreaming {
           }
           try {
             val esRdd = rdd.mapPartitions(newsIter => {
-              mapPartitionsFunc(news_mode_map,
-                blacklistBrdcst,
-                whitelistBrdcst,
-                senseWordsBrdcst,
-                esIdx,
-                esErrIdx,
-                newsIter,
-                esIdField)
+              mapPartitionsFunc(blacklistBrdcst, whitelistBrdcst, senseWordsBrdcst,
+                esIdx, esErrIdx, newsIter, esIdField)
             })
             EsSpark.saveToEs(esRdd, s"{$ES_INDEX_KEY}/_doc", esOptions)
             StreamingUtils.saveOffsets(offsetRanges, kafkaParams, zkQuorums)
@@ -124,8 +115,7 @@ object NewsStreaming {
   }
 
   // 主要处理逻辑
-  private def mapPartitionsFunc(news_mode_map: util.HashMap[String, Int],
-                                blacklistBrdcst: Broadcast[Array[String]],
+  private def mapPartitionsFunc(blacklistBrdcst: Broadcast[Array[String]],
                                 whitelistBrdcst: Broadcast[Array[String]],
                                 senseWordsBrdcst: Broadcast[Array[String]],
                                 ES_INDEX: String, ES_ERROR_INDEX: String,
@@ -137,8 +127,6 @@ object NewsStreaming {
       val messageNode = JsonNodeUtils.getJsonNodeFromStringContent(msg).asInstanceOf[ObjectNode]
       // 验证article_genre
       if (messageNode.hasNonNull("article_genre")) {
-        // 添加 store_time , news_mode 信息
-        addExtraInfo(messageNode, news_mode_map)
         common_validate(messageNode, ES_INDEX, ES_ERROR_INDEX)
       } else {
         NewsProcess.addErrorInfo(messageNode, ES_ERROR_INDEX, "the field article_genre is Null!")
@@ -153,14 +141,14 @@ object NewsStreaming {
       //验证一些字段的长度限制url,tags,title,author
       NewsProcess.validate_fields_length(messageNode, ES_ERROR_INDEX)
       if (!messageNode.has(Constant.FIELD_ERROR_KEY)) {
-        val news_mode = messageNode.get("newsmode").asInt()
-        if (news_mode != -2) { //微博的不验证敏感词
-          NewsProcess.addSensetiveInfo(messageNode, senseWordsBrdcst.value)
-        }
+        // 验证敏感词
+        NewsProcess.addSensetiveInfo(messageNode, senseWordsBrdcst.value)
         NewsProcess.addGrantLevelInfo(redis, messageNode)
       } else {
         messageNode.put(ES_INDEX_KEY, ES_ERROR_INDEX) //防止漏加错误索引
       }
+      messageNode.remove("contenttext")
+      messageNode.remove("parsed_content")
       jsonNode2Map(messageNode) //最终将数据转换成map形式，便于发送至es
     })
     messages
@@ -228,27 +216,6 @@ object NewsStreaming {
       }
     }
     record_id
-  }
-
-  /**
-   * 添加newsmode字段
-   */
-  def addExtraInfo(messageNode: ObjectNode, news_mode_map: util.HashMap[String, Int]): Unit = {
-    val article_genre = messageNode.get("article_genre").textValue()
-    messageNode.put("newsmode", news_mode_map.get(article_genre))
-  }
-
-  /**
-   * 获取文章类型 article:1,gallery:2,video:3,ec:6,novel:7,cartoon:8,stock:-1,sports_live:11,ad:12,article_video:-999
-   */
-  def getNewsModeMap(properties: Properties): util.HashMap[String, Int] = {
-    val map = new util.HashMap[String, Int]()
-    val newsmode_str = properties.getProperty("news_mode")
-    newsmode_str.split(",").foreach(type_mode => {
-      val data = type_mode.split(":")
-      map.put(data(0), data(1).toInt)
-    })
-    map
   }
 
   private def validateBWlist(ES_ERROR_INDEX: String,

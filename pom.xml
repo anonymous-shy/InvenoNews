@@ -8,11 +8,10 @@
     <artifactId>InvenoNews</artifactId>
     <packaging>pom</packaging>
     <version>1.0</version>
-    <modules>
 
+    <modules>
         <module>NewsStreaming</module>
         <module>Spark1Jars</module>
-
     </modules>
 
 

@@ -12,10 +12,20 @@ import redis.clients.jedis.JedisCluster
 
 
 object NewsProcess {
-  val replaceOldFields = new java.util.ArrayList[String](util.Arrays.asList("data_source_id", "parsed_content",
-    "parsed_content_main_body", "media", "id", "info_source",
-    "publish_time", "newsmode", "url", "article_genre", "comment_count",
-    "click_count", "like_count", "data_source_sub_id", "sub_channel", "_id", "repost_count"))
+  val replaceOldFields = new java.util.ArrayList[String](util.Arrays.asList(
+    "data_source_id", "parsed_content_main_body", "media",
+    "id", "publish_time", "newsmode", "url", "article_genre",
+    "like_count", "data_source_sub_id", "sub_channel", "_id",
+    "repost_count", "parser_info", "proxy_para", "parsed_content_char_count",
+    "dbkey", "frequency", "crawl_type_id", "toutiao_category_class",
+    "task_priority", "para_info", "js_para", "authorized",
+    "reviewmaf", "reviewscore", "task_run_state_time", "crawlid",
+    "toutiao_out_url", "inveno_keywords", "reviewsummary", "saved_data_location",
+    "post_request", "proxy", "status_code", "batch_id", "cookiejar", "update_time",
+    "audio_location", "parse_function", "dbkey_all", "toutiao_category_class_id",
+    "timestamp", "dont_filter", "comment_count", "click_count",
+    "data_source_key", "toutiao_refer_url", "audio_location_count", "data_source_type",
+    "kafka_offset", "save_location", "original_url", "appid", "url_domain", "is_banned"))
 
   def getNowTime: String = {
     var now_time = LocalDateTime.now().toString
@@ -67,12 +77,14 @@ object NewsProcess {
     // inveno field 转换
     messageNode.set("link", messageNode.get("response_url"))
     messageNode.set("content", messageNode.get("parsed_content"))
+    messageNode.set("contenttext", messageNode.get("parsed_content_main_body"))
     messageNode.set("pubDate", messageNode.get("publish_time"))
     messageNode.set("ctime", messageNode.get("timestamp"))
     messageNode.set("mode", messageNode.get("article_genre"))
     messageNode.set("source", messageNode.get("channel"))
+    messageNode.set("desc", messageNode.get("description"))
     messageNode.set("sourcesubname", messageNode.get("sub_channel"))
-    messageNode.set("datasourcetype", messageNode.get("data_source_type"))
+    messageNode.set("datasourcetype", messageNode.get("media"))
     messageNode.set("datasourcesubid", messageNode.get("data_source_sub_id"))
     messageNode.set("datasourceid", messageNode.get("data_source_id"))
     //**********************************************************************/
@@ -396,7 +408,6 @@ object NewsProcess {
       }
       sense_word_get = title_sense || content_sense
     }
-
     messageNode.put("contenttext", sense_node.toString)
   }
 

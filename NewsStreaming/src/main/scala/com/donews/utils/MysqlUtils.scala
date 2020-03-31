@@ -34,7 +34,7 @@ object MysqlUtils {
           //          println("name, value = " + name + ", " + value)
         }
       } catch {
-        case e => e.printStackTrace
+        case e: Throwable => e.printStackTrace()
 
       }
       connection.close()
@@ -103,7 +103,7 @@ object MysqlUtils {
       array = list.toArray[String]
       if (broadCast != null) broadCast.unpersist(true)
     } catch {
-      case e =>
+      case e: Throwable =>
         println("数据库连接不上 需要重用历史广播变量 getSourceWhiteList")
         e.printStackTrace()
         array = broadCast.value
@@ -135,9 +135,9 @@ object MysqlUtils {
       array = list.toArray[String]
       if (broadCast != null) broadCast.unpersist(true)
     } catch {
-      case e => {
+      case e: Throwable => {
         println("数据库连接不上 需要重用历史广播变量 getSensetiveWords")
-        e.printStackTrace
+        e.printStackTrace()
         array = broadCast.value
       }
     } finally {
@@ -162,7 +162,7 @@ object MysqlUtils {
         list.append(topic_es_info)
       }
     } catch {
-      case e => e.printStackTrace
+      case e: Throwable => e.printStackTrace()
     }
     connection.close()
     list.toArray[String]
