@@ -24,7 +24,7 @@ object NewsProcess {
     "post_request", "proxy", "status_code", "batch_id", "cookiejar", "update_time",
     "audio_location", "parse_function", "dbkey_all", "toutiao_category_class_id",
     "timestamp", "dont_filter", "comment_count", "click_count",
-    "data_source_key", "toutiao_refer_url", "audio_location_count", "data_source_type",
+    "toutiao_refer_url", "audio_location_count", "data_source_type",
     "kafka_offset", "save_location", "original_url", "appid", "url_domain", "is_banned"))
 
   def getNowTime: String = {
@@ -78,8 +78,10 @@ object NewsProcess {
     messageNode.set("link", messageNode.get("response_url"))
     messageNode.set("content", messageNode.get("parsed_content"))
     messageNode.set("contenttext", messageNode.get("parsed_content_main_body"))
-    messageNode.set("pubDate", messageNode.get("publish_time"))
-    messageNode.set("ctime", messageNode.get("timestamp"))
+    //    messageNode.set("pubDate", messageNode.get("publish_time").textValue().replace("T",""))
+    messageNode.put("pubDate", messageNode.get("publish_time").textValue().replace("T", " "))
+    //    messageNode.set("ctime", messageNode.get("timestamp"))
+    messageNode.put("ctime", messageNode.get("timestamp").textValue().replace("T", " "))
     messageNode.set("mode", messageNode.get("article_genre"))
     messageNode.set("source", messageNode.get("channel"))
     messageNode.set("desc", messageNode.get("description"))
