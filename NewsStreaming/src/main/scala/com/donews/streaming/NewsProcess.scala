@@ -277,13 +277,18 @@ object NewsProcess {
       var index = 0
       while (vd_list_nodes.hasNext) {
         val vd_node = vd_list_nodes.next().asInstanceOf[ObjectNode]
+        //        val vd_node = vd_list_nodes.next()  //.asInstanceOf[ObjectNode]
         if (0 == index && !genre.equals("gallery")) { //gallery类型数据不做处理
           //如果有多个视频，把第一个视频的属性设置为此数据的视频属性
           if (!vd_node.hasNonNull("video_duration")) {
             println(s"视频缺乏视频时长字段 str=> ${messageNode.toString}")
-            addErrorInfo(messageNode, error_index, "视频时长字段video_location为null ！")
+            addErrorInfo(messageNode, error_index, "视频时长字段video_duration为null.")
           } else {
             val duration_str = vd_node.findValue("video_duration").textValue()
+            //            val durationJN = vd_node.findValue("video_duration")
+            //            val duration_str = vd_node.findValue("video_duration").toString //.replaceAll("\"", "")
+            //            val videoDuration = vd_node.get("video_duration").textValue()
+
             val duration = GNewsUtil.videoTime2Sec(duration_str)
             messageNode.put("videotime", duration)
             if (duration < 5) {

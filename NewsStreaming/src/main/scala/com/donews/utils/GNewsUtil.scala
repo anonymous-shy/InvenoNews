@@ -11,8 +11,8 @@ import scala.collection.mutable
 
 
 /**
-  * Created by Shy on 2017/10/23
-  */
+ * Created by Shy on 2017/10/23
+ */
 
 object GNewsUtil {
 
@@ -48,13 +48,13 @@ object GNewsUtil {
   }
 
   /**
-    * 标签提取
-    *
-    * @param
-    * @param
-    * @param
-    * @return 红米pro:0.7049,骁龙660:0.2773,全面屏:0.2495,再曝:0.2311,mah:0.2107,猛料:0.2062,99元:0.175,小米:0.132
-    */
+   * 标签提取
+   *
+   * @param
+   * @param
+   * @param
+   * @return 红米pro:0.7049,骁龙660:0.2773,全面屏:0.2495,再曝:0.2311,mah:0.2107,猛料:0.2062,99元:0.175,小米:0.132
+   */
   /*def extractTags(title: String, contenttext: String, newsmode: String): String = {
     val httpClient = HttpClients.createDefault
     val inner_interface = "http://10.27.83.8:28080/process/getResults" //老的ip：10.44.153.64，端口80，新的采用隧道
@@ -81,12 +81,12 @@ object GNewsUtil {
   }*/
 
   /**
-    * 将提取tags转为 Map[String, Float]("生鲜电商" -> 0.5786)
-    * 生鲜电商:0.5786,易果生鲜:0.3921,冷链物流:0.2591,安鲜达:0.2156,冷链:0.1656,生鲜冷链:0.1644,生鲜:0.112,门槛:0.108
-    *
-    * @param vec
-    * @return
-    */
+   * 将提取tags转为 Map[String, Float]("生鲜电商" -> 0.5786)
+   * 生鲜电商:0.5786,易果生鲜:0.3921,冷链物流:0.2591,安鲜达:0.2156,冷链:0.1656,生鲜冷链:0.1644,生鲜:0.112,门槛:0.108
+   *
+   * @param vec
+   * @return
+   */
   def vec2Map(vec: String): Map[String, Float] = {
     val map = mutable.Map[String, Float]()
     if ("".equals(vec) || vec == null)
@@ -95,19 +95,19 @@ object GNewsUtil {
       val vecArr = vec.split(",")
       vecArr foreach { word =>
         val ws = word.split(":")
-        if(ws.length>=2)
-            map += (ws(0) -> ws(1).toFloat)
+        if (ws.length >= 2)
+          map += (ws(0) -> ws(1).toFloat)
       }
       map.toMap
     }
   }
 
   /**
-    * 转化得分
-    *
-    * @param vecMap
-    * @return
-    */
+   * 转化得分
+   *
+   * @param vecMap
+   * @return
+   */
   def mod(vecMap: Map[String, Float]): Double = {
     var score = 0.0
     vecMap.values foreach { s =>
@@ -117,12 +117,12 @@ object GNewsUtil {
   }
 
   /**
-    * 计算相似度
-    *
-    * @param tag1
-    * @param tag2
-    * @return
-    */
+   * 计算相似度
+   *
+   * @param tag1
+   * @param tag2
+   * @return
+   */
   def similarity(tag1: String, tag2: String): Double = {
     var similarScore = 0.0
     val m1 = vec2Map(tag1)
@@ -150,7 +150,6 @@ object GNewsUtil {
   }
 
 
-
   def en2cnTimestamp(en_timestamp: String): String = {
     val en_sdf = new SimpleDateFormat("EEE MMM dd HH:mm:ss z yyyy", Locale.ENGLISH)
     val cn_sdf = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss")
@@ -172,22 +171,19 @@ object GNewsUtil {
 
 
   def main(args: Array[String]): Unit = {
-    val tags1:String = "百度外卖:0.81,裁撤:0.2914,代理商:0.192,渠道城市经理:0.1871,部分城:0.1757,渠道:0.1326,经理:0.1185,更名:0.1084"
-    val tags2:String = "百度外卖:0.7425,渠道城市经理:0.4572,裁撤:0.2594,饿了么:0.1708,猎云网:0.1501,代理商:0.129,渠道:0.1111,经理:0.0869"
-    val tags3 = "领克:0.9001,领克中心:0.1772,gla:0.1602,奔驰:0.096,对标:0.0735,开启预售:0.0671,7d:0.0648,suv:0.0578"
-    val tags4 = "领克:0.8836,试驾体验:0.1362,直喷发动机:0.1302,rpm:0.1131,7d:0.0938,都市生活:0.0925,涡轮增压:0.0892,2.0:0.0834"
+    //    val tags1:String = "百度外卖:0.81,裁撤:0.2914,代理商:0.192,渠道城市经理:0.1871,部分城:0.1757,渠道:0.1326,经理:0.1185,更名:0.1084"
+    //    val tags2:String = "百度外卖:0.7425,渠道城市经理:0.4572,裁撤:0.2594,饿了么:0.1708,猎云网:0.1501,代理商:0.129,渠道:0.1111,经理:0.0869"
+    //    val tags3 = "领克:0.9001,领克中心:0.1772,gla:0.1602,奔驰:0.096,对标:0.0735,开启预售:0.0671,7d:0.0648,suv:0.0578"
+    //    val tags4 = "领克:0.8836,试驾体验:0.1362,直喷发动机:0.1302,rpm:0.1131,7d:0.0938,都市生活:0.0925,涡轮增压:0.0892,2.0:0.0834"
 
-
-
-
-    val value =  similarity(tags3,tags4)
-//    val json_str4=""
-//    val messageNode = JsonNodeUtils.getJsonNodeFromStringContent(json_str4).asInstanceOf[ObjectNode]
-//    val contenttext_node = GnewsDataService.getFieldNode(messageNode,"parsed_content_main_body")
-//    val title = messageNode.get("title").toString
-//
-//    val dirtyCode = !GNewsUtil.checkArticleCode(title.toString, contenttext_node.textValue())
-    println(value)  //0.9133298442170793
+    //    val value =  similarity(tags3,tags4)
+    //    val json_str4=""
+    //    val messageNode = JsonNodeUtils.getJsonNodeFromStringContent(json_str4).asInstanceOf[ObjectNode]
+    //    val contenttext_node = GnewsDataService.getFieldNode(messageNode,"parsed_content_main_body")
+    //    val title = messageNode.get("title").toString
+    //
+    //    val dirtyCode = !GNewsUtil.checkArticleCode(title.toString, contenttext_node.textValue())
+    //    println(value)  //0.9133298442170793
   }
 
 }
